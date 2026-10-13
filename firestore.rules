@@ -1,0 +1,99 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 과제별 score의 범위. src/progress/challenges.ts의 정의와 같아야 한다
+    // (tests/online/rulesFloors.test.ts가 비교한다). 표에 없는 과제 id는 쓸 수 없다.
+    //   min: 하한(minScore)
+    //   max: 상한. 시간으로 재는 과제는 제한 시간(limitMs) × 배치 수,
+    //        횟수로 재는 과제는 제한 시간 안에 할 수 있는 동작의 수(limitMs ÷ 동작 하나의 시간 500ms) × 배치 수
+    //   step: score는 이 값의 배수여야 한다. 시간으로 재는 과제는 50(ms), 횟수로 재는 과제는 1
+    function limits() {
+      return {
+        'c01-first-v1': { 'min': 8000, 'max': 60000, 'step': 50 },
+        'c02-row-v1': { 'min': 11000, 'max': 60000, 'step': 50 },
+        'c03-ripe-v1': { 'min': 12500, 'max': 70000, 'step': 50 },
+        'c04-grid-v1': { 'min': 19500, 'max': 70000, 'step': 50 },
+        'c05-water-v1': { 'min': 14500, 'max': 110000, 'step': 50 },
+        'c06-sunflower-v1': { 'min': 10500, 'max': 300000, 'step': 50 },
+        'c07-tomato-v1': { 'min': 24000, 'max': 600000, 'step': 50 },
+        'c08-crate-v1': { 'min': 19, 'max': 540, 'step': 1 }
+      };
+    }
+
+    function validScore(challengeId, score) {
+      let range = limits().get(challengeId, null);
+      return range != null && score is int
+        && score >= range.min && score <= range.max && score % range.step == 0;
+    }
+
+    // 필드의 모양과 범위. at과 nickAt이 서버 시각인지는 쓰는 경우마다 따로 검사한다.
+    // 닉네임 길이는 클라이언트(cleanNickname)가 코드 포인트로 2~10자를 정확히 검사한다.
+    // 규칙의 문자열 size()는 코드 포인트 수와 다를 수 있으므로 여기서는 2~40으로 넉넉히 둔다.
+    // lines의 상한은 코드 길이의 한도(20,000자)와 같다. 한 줄은 적어도 한 글자이다.
+    function validBody(challengeId, d) {
+      return d.keys().hasOnly(['nickname', 'score', 'actions', 'lines', 'at', 'nickAt'])
+        && d.keys().hasAll(['nickname', 'score', 'actions', 'lines', 'at', 'nickAt'])
+        && d.nickname is string && d.nickname.size() >= 2 && d.nickname.size() <= 40
+        && d.actions is int && d.lines is int
+        && d.actions >= 0 && d.actions <= 1000000
+        && d.lines >= 0 && d.lines <= 20000
+        && d.at is timestamp && d.nickAt is timestamp
+        && validScore(challengeId, d.score);
+    }
+
+    // nickAt은 닉네임을 마지막으로 정한 서버 시각이다.
+    function nickKept(next, prev) {
+      return next.nickname == prev.nickname && next.nickAt == prev.nickAt;
+    }
+    // 닉네임은 앞서 정한 뒤 60초가 넘게 지나야 바꿀 수 있다.
+    // 닉네임을 번갈아 쓰는 것만으로 하루 쓰기 한도를 소모시키지 못하게 하려는 것이다.
+    function nickChanged(next, prev) {
+      return next.nickname != prev.nickname && next.nickAt == request.time
+        && request.time > prev.nickAt + duration.value(60, 's');
+    }
+
+    match /challenges/{challengeId}/scores/{uid} {
+      allow read: if true;
+
+      allow create: if request.auth != null && request.auth.uid == uid
+        && validBody(challengeId, request.resource.data)
+        && request.resource.data.at == request.time
+        && request.resource.data.nickAt == request.time;
+
+      allow update: if request.auth != null && request.auth.uid == uid
+        && validBody(challengeId, request.resource.data)
+        && (
+          // 더 좋은(작은) 기록으로 바꾸는 경우. 닉네임은 그대로 두거나 함께 바꾼다.
+          (request.resource.data.score < resource.data.score
+            && request.resource.data.at == request.time
+            && (nickKept(request.resource.data, resource.data) || nickChanged(request.resource.data, resource.data)))
+          // 닉네임만 바꾸는 경우. 아무것도 바꾸지 않는 갱신은 거부한다.
+          || (request.resource.data.score == resource.data.score
+            && request.resource.data.actions == resource.data.actions
+            && request.resource.data.lines == resource.data.lines
+            && request.resource.data.at == resource.data.at
+            && nickChanged(request.resource.data, resource.data))
+        );
+
+      // 삭제는 거부한다(관리자가 콘솔에서 지운다).
+
+      // 제출한 코드는 본인만 읽고 쓴다. 문서 id는 code 하나뿐이다.
+      match /private/{docId} {
+        allow read: if request.auth != null && request.auth.uid == uid && docId == 'code';
+        // 코드는 같은 요청에서 점수 문서가 만들어지거나 더 좋은 기록으로 바뀔 때에만 쓸 수 있다.
+        // 그 두 경우에만 점수 문서의 at이 이 요청의 서버 시각이 되므로, 요청이 끝난 뒤의 점수 문서(getAfter)로 확인한다.
+        // 코드만 따로 쓰거나 닉네임만 바꾸면서 코드를 쓰는 요청은 거부된다. 표에 없는 과제 id 아래에도 쓸 수 없다.
+        allow create, update: if request.auth != null && request.auth.uid == uid && docId == 'code'
+          && challengeId in limits()
+          && getAfter(/databases/$(database)/documents/challenges/$(challengeId)/scores/$(uid)).data.at == request.time
+          && request.resource.data.keys().hasOnly(['code'])
+          && request.resource.data.code is string
+          && request.resource.data.code.size() <= 20000;
+      }
+    }
+
+    // 그 밖의 모든 경로는 거부한다(재귀 와일드카드를 쓰지 않는다).
+  }
+}

@@ -1,0 +1,7 @@
+node_modules
+dist
+*.local
+.superpowers
+.omc
+*-debug.log
+.firebase
