@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { FIREBASE_CONFIG } from '../../src/online/firebaseConfig'
 import { createRanking } from '../../src/online'
 import { offlineRanking, withTimeout } from '../../src/online/ranking'
 
@@ -29,7 +30,7 @@ describe('withTimeout', () => {
 })
 
 describe('createRanking', () => {
-  it('설정값이 null이면 꺼진 서비스이다', () => {
-    expect(createRanking().enabled).toBe(false)
+  it('설정값이 있을 때에만 켜진 서비스이다', () => {
+    expect(createRanking().enabled).toBe(FIREBASE_CONFIG !== null)
   })
 })
